@@ -7,7 +7,7 @@ sys.modules['sentence_transformers'] = MagicMock()
 
 import pytest
 import numpy as np
-from bfa_sdk.router.embedder import DummyEmbedder, OpenAIEmbedder, LocalEmbedder
+from bfa_gateway.router.embedder import DummyEmbedder, OpenAIEmbedder, LocalEmbedder
 
 def test_dummy_embedder():
     embedder = DummyEmbedder()

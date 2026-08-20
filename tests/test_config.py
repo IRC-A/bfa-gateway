@@ -1,7 +1,7 @@
 import pytest
 import os
 import yaml
-from bfa_sdk.config import BFAConfig
+from bfa_gateway.config import BFAConfig
 
 def test_config_load_from_env():
     # Set mock environment variables

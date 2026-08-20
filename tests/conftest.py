@@ -6,7 +6,7 @@ def clear_global_router_registry():
     Autouse fixture that clears the global gateway ROUTER registry 
     and index before and after every test to prevent test pollution.
     """
-    import bfa_sdk.core.gateway as gateway_mod
+    import bfa_gateway.app as gateway_mod
     
     # Pre-test cleanup
     if getattr(gateway_mod, "ROUTER", None) is not None:

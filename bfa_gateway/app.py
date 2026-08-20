@@ -19,7 +19,7 @@ from cryptography.exceptions import InvalidSignature
 from bfa_gateway.config import BFAConfig
 from bfa_gateway.router.embedder import LocalEmbedder, DummyEmbedder, OpenAIEmbedder
 from bfa_gateway.router.search import BFASemanticRouter
-from bfa_sdk.paseto import sign_paseto_v4_public, verify_paseto_v4_public
+from bfa_gateway.paseto import sign_paseto_v4_public, verify_paseto_v4_public
 
 # Global application dependencies
 CONFIG = BFAConfig()

@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import MagicMock
-from bfa_sdk.router.embedder import DummyEmbedder
-from bfa_sdk.router.search import BFASemanticRouter
+from bfa_gateway.router.embedder import DummyEmbedder
+from bfa_gateway.router.search import BFASemanticRouter
 
 def test_semantic_router_indexing_and_resolution():
     # 1. Initialize embedder and router

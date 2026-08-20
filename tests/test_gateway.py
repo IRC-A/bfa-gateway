@@ -4,8 +4,8 @@ import json
 from unittest.mock import AsyncMock, patch, MagicMock
 from fastapi.testclient import TestClient
 from fastapi import HTTPException
-from bfa_sdk.config import BFAConfig
-from bfa_sdk.core.gateway import create_gateway_app, discover_agents, discover_tools, load_persisted_endpoints
+from bfa_gateway.config import BFAConfig
+from bfa_gateway.app import create_gateway_app, discover_agents, discover_tools, load_persisted_endpoints
 
 # Clean up bfa_registry_db.json if it gets created during test runs
 @pytest.fixture(autouse=True)
@@ -51,7 +51,7 @@ def mock_gateway_setup():
         }
     ]
 
-    with patch("bfa_sdk.core.gateway.A2ACardResolver") as mock_resolver_cls, \
+    with patch("bfa_gateway.app.A2ACardResolver") as mock_resolver_cls, \
          patch("httpx.AsyncClient.get") as mock_http_get:
          
         # Mock resolver instance behavior
@@ -100,8 +100,8 @@ def test_gateway_endpoints(mock_gateway_setup):
         assert resolve_res["type"] == "semantic_faiss"
         assert resolve_res["best"]["skill"] == "mock_tool"
 
-@patch("bfa_sdk.core.gateway.discover_agents")
-@patch("bfa_sdk.core.gateway.discover_tools")
+@patch("bfa_gateway.app.discover_agents")
+@patch("bfa_gateway.app.discover_tools")
 def test_dynamic_registration_endpoints(mock_discover_tools, mock_discover_agents, mock_gateway_setup):
     def mock_discover_agents_side_effect(urls):
         if "http://localhost:8080" in urls:
@@ -264,7 +264,7 @@ async def test_discover_tools_error(mock_get):
     res = await discover_tools(["http://invalid-url"])
     assert res == {}
 
-from bfa_sdk.core.gateway import persist_endpoint
+from bfa_gateway.app import persist_endpoint
 
 def test_persist_endpoint_error():
     with patch("builtins.open", side_effect=IOError("disk full")):
@@ -286,7 +286,7 @@ async def test_discover_agents_success():
     mock_skill.examples = ["ex"]
     mock_agent_card.skills = [mock_skill]
     
-    with patch("bfa_sdk.core.gateway.A2ACardResolver") as mock_resolver_cls:
+    with patch("bfa_gateway.app.A2ACardResolver") as mock_resolver_cls:
         mock_resolver = AsyncMock()
         mock_resolver.get_agent_card.return_value = mock_agent_card
         mock_resolver_cls.return_value = mock_resolver
@@ -318,8 +318,8 @@ async def test_discover_tools_success():
         assert res["my_tool"]["server_url"] == "http://valid-url"
 
 # Test lifespans with different embedder configurations
-@patch("bfa_sdk.core.gateway.discover_agents", return_value={})
-@patch("bfa_sdk.core.gateway.discover_tools", return_value={})
+@patch("bfa_gateway.app.discover_agents", return_value={})
+@patch("bfa_gateway.app.discover_tools", return_value={})
 @patch("openai.OpenAI")
 def test_gateway_lifespan_openai(mock_openai, mock_discover_tools, mock_discover_agents):
     config = BFAConfig()
@@ -332,8 +332,8 @@ def test_gateway_lifespan_openai(mock_openai, mock_discover_tools, mock_discover
         # Startup event triggered, check if embedder setup correctly
         pass
 
-@patch("bfa_sdk.core.gateway.discover_agents", return_value={})
-@patch("bfa_sdk.core.gateway.discover_tools", return_value={})
+@patch("bfa_gateway.app.discover_agents", return_value={})
+@patch("bfa_gateway.app.discover_tools", return_value={})
 @patch("sentence_transformers.SentenceTransformer", side_effect=Exception("local load failed"))
 def test_gateway_lifespan_local_fallback(mock_transformer, mock_discover_tools, mock_discover_agents):
     config = BFAConfig()
@@ -356,7 +356,7 @@ def test_mangum_import_error():
     try:
         # Mock ImportError for mangum
         sys.modules["mangum"] = None
-        importlib.reload(sys.modules["bfa_sdk.core.gateway"])
+        importlib.reload(sys.modules["bfa_gateway.app"])
     finally:
         # Restore original
         if orig_mangum:
@@ -365,7 +365,7 @@ def test_mangum_import_error():
             sys.modules.pop("mangum", None)
 
 def test_gateway_not_ready():
-    import bfa_sdk.core.gateway as gateway
+    import bfa_gateway.app as gateway
     orig_router = gateway.ROUTER
     try:
         config = BFAConfig()
@@ -392,7 +392,7 @@ def test_gateway_not_ready():
     finally:
         gateway.ROUTER = orig_router
 
-@patch("bfa_sdk.core.gateway.discover_agents", return_value={})
+@patch("bfa_gateway.app.discover_agents", return_value={})
 def test_gateway_register_agent_fail(mock_discover, mock_gateway_setup):
     config = BFAConfig()
     app = create_gateway_app(config)
@@ -400,7 +400,7 @@ def test_gateway_register_agent_fail(mock_discover, mock_gateway_setup):
         res = client.post("/register/agent", params={"url": "http://invalid"})
         assert res.status_code == 400
 
-@patch("bfa_sdk.core.gateway.discover_tools", return_value={})
+@patch("bfa_gateway.app.discover_tools", return_value={})
 def test_gateway_register_mcp_fail(mock_discover, mock_gateway_setup):
     config = BFAConfig()
     app = create_gateway_app(config)
@@ -408,8 +408,8 @@ def test_gateway_register_mcp_fail(mock_discover, mock_gateway_setup):
         res = client.post("/register/mcp", params={"url": "http://invalid"})
         assert res.status_code == 400
 
-@patch("bfa_sdk.core.gateway.discover_tools")
-@patch("bfa_sdk.core.gateway.discover_agents")
+@patch("bfa_gateway.app.discover_tools")
+@patch("bfa_gateway.app.discover_agents")
 def test_gateway_register_agent_collisions(mock_discover_agents, mock_discover_tools, mock_gateway_setup):
     def mock_discover_agents_side_effect(urls):
         if "http://localhost:8001" in urls:
@@ -461,15 +461,15 @@ def test_gateway_register_agent_collisions(mock_discover_agents, mock_discover_t
         assert res_sem.status_code == 409
         assert "identical semantic metadata is already registered" in res_sem.json()["detail"]
 
-    import bfa_sdk.core.gateway as gateway_mod
+    import bfa_gateway.app as gateway_mod
     if gateway_mod.ROUTER:
         gateway_mod.ROUTER.registry.clear()
         gateway_mod.ROUTER.index = None
         gateway_mod.ROUTER.index_keys = []
 
 
-@patch("bfa_sdk.core.gateway.discover_tools")
-@patch("bfa_sdk.core.gateway.discover_agents")
+@patch("bfa_gateway.app.discover_tools")
+@patch("bfa_gateway.app.discover_agents")
 def test_gateway_register_mcp_collisions(mock_discover_agents, mock_discover_tools, mock_gateway_setup):
     def mock_discover_tools_side_effect(urls):
         if "http://localhost:8003" in urls:
@@ -521,7 +521,7 @@ def test_gateway_register_mcp_collisions(mock_discover_agents, mock_discover_too
         assert res_sem.status_code == 409
         assert "identical semantic metadata is already registered" in res_sem.json()["detail"]
 
-    import bfa_sdk.core.gateway as gateway_mod
+    import bfa_gateway.app as gateway_mod
     if gateway_mod.ROUTER:
         gateway_mod.ROUTER.registry.clear()
         gateway_mod.ROUTER.index = None
