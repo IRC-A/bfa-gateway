@@ -1,4 +1,4 @@
-name: Publish Docker Image and GitHub Release
+name: CI/CD Pipeline (Test, Release & Publish Docker Image)
 
 on:
   push:
@@ -12,12 +12,39 @@ on:
   workflow_dispatch:
 
 jobs:
+  test:
+    name: 🧪 Run Unit Tests & Coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Run Test Suite with Coverage
+        run: |
+          pytest --cov=bfa_gateway --cov-report=term-missing
+
   build-and-publish:
+    name: 📦 🐳 Build & Publish Release & Docker Image
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: write
       packages: write
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
