@@ -7,6 +7,7 @@ services:
     image: sandrog77/bfa-gateway:latest
     ports:
       - "8000:8000"
+      - "8080:8000"
     environment:
       - BFA_USE_MOCK_EMBEDDINGS=true
       - BFA_USE_OPENAI_EMBEDDINGS=false
