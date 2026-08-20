@@ -10,8 +10,7 @@ The **BFA Gateway** is a domain-agnostic capability directory and token broker. 
 - **Semantic Discovery**: FAISS vector search with L2 distance to confidence score mapping.
 - **Asymmetric Handshake**: Ed25519 challenge-response dynamic registration (`POST /register/init`, `POST /register/verify`).
 - **Token Minting**: PASETO v4.public token minting (`POST /discover`, `POST /mint`).
-- **Observability & Trace Logs**: Embedded system log buffer (`GET /logs`) and Langsmith token usage aggregator.
-- **React Dashboard UI**: Comprehensive React dashboard (`frontend/`) with live Capability Registry, System Trace Logs, Chatbot, and Token Analytics.
+- **Native Web Console & Observability**: Built-in HTML Web Console served directly at `http://localhost:8000/` featuring live connected A2A Agents, FastMCP Tool Servers, System Trace Logs (`/gateway-logs`), and Token Usage metrics.
 - **Persistence**: Supports local JSON persistence (`bfa_registry_db.json`) and AWS DynamoDB with optimistic locking.
 - **Deployment**: Single container (`Dockerfile`), `docker-compose.yml`, Terraform GCP Cloud Run, and Serverless AWS Lambda (Mangum adapter).
 
@@ -25,15 +24,7 @@ source .venv/bin/activate
 pip install -e .
 bfa-gateway
 ```
-
-### Run React Dashboard UI
-
-```bash
-cd frontend
-npm install
-npm start
-```
-The dashboard runs at `http://localhost:3000` connected to the Gateway at `http://localhost:8000`.
+Access the native **IRC-A Gateway Web Console** by opening `http://localhost:8000/` in your browser.
 
 ### Run with Docker
 

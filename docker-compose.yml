@@ -14,21 +14,6 @@ services:
     networks:
       - irca
 
-  bfa-frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    container_name: bfa-frontend
-    image: sandrog77/bfa-frontend:latest
-    ports:
-      - "3000:3000"
-    environment:
-      - REACT_APP_GATEWAY_URL=http://localhost:8000
-    depends_on:
-      - bfa-gateway
-    networks:
-      - irca
-
 networks:
   irca:
     external: true
