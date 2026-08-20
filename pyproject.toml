@@ -47,5 +47,4 @@ include = ["bfa_gateway*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-anyio_backend = "asyncio"
 
