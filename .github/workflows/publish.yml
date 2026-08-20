@@ -1,38 +1,48 @@
-name: CD (Release & Publish Docker Image)
+name: Publish Docker Image and GitHub Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
   release:
     types: [published]
-  workflow_dispatch:
 
 jobs:
-  publish-release-docker:
-    name: Publish Release & Docker Image
+  build-and-publish:
     runs-on: ubuntu-latest
     permissions:
+      id-token: write
       contents: write
       packages: write
-
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Extract Tag or Version Name
-        id: version
-        run: |
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            TAG_NAME="${github.ref_name}"
-          else
-            BASE_VERSION=$(grep -E '^version = ' pyproject.toml | awk -F '"' '{print $2}')
-            TAG_NAME="v${BASE_VERSION}"
-          fi
-          echo "tag=$TAG_NAME" >> $GITHUB_OUTPUT
-          echo "Building release for tag: $TAG_NAME"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
-      - name: Set up QEMU (Multi-platform support)
+      - name: Auto-bump version (Push/PR)
+        if: github.event_name != 'release'
+        run: |
+          BASE_VERSION=$(grep -E '^version = ' pyproject.toml | awk -F '"' '{print $2}')
+          NEW_VERSION="${BASE_VERSION}.dev${{ github.run_number }}"
+          sed -i "s/version = \"$BASE_VERSION\"/version = \"$NEW_VERSION\"/" pyproject.toml
+          echo "NEW_VERSION=$NEW_VERSION" >> $GITHUB_ENV
+          echo "VERSION=$NEW_VERSION" >> $GITHUB_ENV
+
+      - name: Set Version for Release
+        if: github.event_name == 'release'
+        run: |
+          BASE_VERSION=$(grep -E '^version = ' pyproject.toml | awk -F '"' '{print $2}')
+          echo "NEW_VERSION=$BASE_VERSION" >> $GITHUB_ENV
+          echo "VERSION=$BASE_VERSION" >> $GITHUB_ENV
+
+      - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
@@ -63,8 +73,7 @@ jobs:
             sandrog77/bfa-gateway
           tags: |
             type=raw,value=latest
-            type=ref,event=tag
-            type=semver,pattern={{version}}
+            type=raw,value=v${{ env.VERSION }}
 
       - name: Build and Push Docker Image
         uses: docker/build-push-action@v6
@@ -76,8 +85,10 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: Create GitHub Release
+        if: github.event_name != 'release'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: "Release ${{ steps.version.outputs.tag }}"
+          tag_name: "v${{ env.NEW_VERSION }}"
+          name: "Release v${{ env.NEW_VERSION }}"
+          prerelease: ${{ github.event_name == 'pull_request' }}
           generate_release_notes: true

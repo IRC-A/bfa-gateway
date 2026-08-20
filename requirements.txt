@@ -1,0 +1,17 @@
+fastapi
+uvicorn
+httpx
+python-dotenv
+a2a-sdk
+numpy
+faiss-cpu
+pydantic
+pyyaml
+mangum
+openai
+pytest
+pytest-cov
+pytest-asyncio
+anyio
+pyjwt
+cryptography
