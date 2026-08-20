@@ -31,6 +31,4 @@ services:
 
 networks:
   irca:
-    name: irca
-    driver: bridge
-    attachable: true
+    external: true
