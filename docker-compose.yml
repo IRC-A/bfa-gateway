@@ -1,22 +1,31 @@
 services:
-  irc-a-gateway:
+  bfa-gateway:
     build:
       context: .
-      dockerfile: Dockerfile.gateway
-    container_name: irc-a-gateway
-    image: sandrog77/irc-a-gateway:latest
+      dockerfile: Dockerfile
+    container_name: bfa-gateway
+    image: sandrog77/bfa-gateway:latest
     ports:
       - "8000:8000"
-    env_file:
-      - .env
     environment:
-      # Enable OpenAI embeddings for semantic FAISS search
-      - BFA_USE_MOCK_EMBEDDINGS=false
-      - BFA_USE_OPENAI_EMBEDDINGS=true
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-    volumes:
-      # Mounts registry database to persist registered agents and tools across restarts
-      - ./bfa_registry_db.json:/app/bfa_registry_db.json
+      - BFA_USE_MOCK_EMBEDDINGS=true
+      - BFA_USE_OPENAI_EMBEDDINGS=false
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    networks:
+      - irca
+
+  bfa-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: bfa-frontend
+    image: sandrog77/bfa-frontend:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_GATEWAY_URL=http://localhost:8000
+    depends_on:
+      - bfa-gateway
     networks:
       - irca
 
