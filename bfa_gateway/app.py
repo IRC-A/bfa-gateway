@@ -1974,8 +1974,8 @@ def main():
     except ImportError:
         pass
 
-    host = os.getenv("BFA_GATEWAY_HOST", "127.0.0.1")
-    port = int(os.getenv("BFA_GATEWAY_PORT", "8000"))
+    host = os.getenv("BFA_GATEWAY_HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", os.getenv("BFA_GATEWAY_PORT", "8080")))
     
     # Check if OpenAI API Key is loaded
     openai_key = os.getenv("OPENAI_API_KEY", "").strip().strip("'\"")
