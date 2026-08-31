@@ -248,9 +248,13 @@ async def discover_tools(endpoints: List[str]) -> Dict[str, Any]:
 
 async def prune_dead_endpoints():
     """
-    Actively pings all registered endpoints. If an agent or MCP server is unreachable, connection refused,
-    or timed out, automatically unregister it, purge it from FAISS, and persist the update.
+    Actively pings all registered endpoints. If an agent or MCP server is unreachable on TWO consecutive checks,
+    automatically unregister it, purge it from FAISS, and persist the update.
     """
+    global _endpoint_fail_counts
+    if not hasattr(prune_dead_endpoints, '_fail_counts'):
+        prune_dead_endpoints._fail_counts = {}
+    
     if not ROUTER:
         return
         
@@ -268,7 +272,7 @@ async def prune_dead_endpoints():
         return
         
     dead_urls = set()
-    async with httpx.AsyncClient(timeout=2.0) as client:
+    async with httpx.AsyncClient(timeout=10.0) as client:
         for url in urls_to_check:
             try:
                 is_mcp = False
@@ -285,9 +289,16 @@ async def prune_dead_endpoints():
                         res = await client.get(f"{url.rstrip('/')}/")
                         
                 if res.status_code >= 500:
-                    dead_urls.add(url)
+                    prune_dead_endpoints._fail_counts[url] = prune_dead_endpoints._fail_counts.get(url, 0) + 1
+                else:
+                    prune_dead_endpoints._fail_counts[url] = 0
             except Exception:
-                dead_urls.add(url)
+                prune_dead_endpoints._fail_counts[url] = prune_dead_endpoints._fail_counts.get(url, 0) + 1
+    
+    # Only remove after 2 consecutive failures
+    for url, count in list(prune_dead_endpoints._fail_counts.items()):
+        if count >= 2:
+            dead_urls.add(url)
                 
     if dead_urls:
         removed_count = 0
@@ -311,7 +322,8 @@ async def prune_dead_endpoints():
             reg["mcp_endpoints"] = [u for u in reg.get("mcp_endpoints", []) if u != dead_url]
             BFAStorageManager.save_registry(reg)
             
-            add_system_log("DISCOVERY", dead_url, f"Endpoint '{dead_url}' is dead/unreachable. Automatically unindexed from FAISS.")
+            add_system_log("DISCOVERY", dead_url, f"Endpoint '{dead_url}' is dead/unreachable (failed {prune_dead_endpoints._fail_counts.get(dead_url, 0)}x). Automatically unindexed from FAISS.")
+            prune_dead_endpoints._fail_counts.pop(dead_url, None)
             
         if removed_count > 0 and ROUTER:
             ROUTER.build_index()
@@ -321,7 +333,7 @@ async def health_monitor_loop():
     """Background task to continuously monitor registered nodes and prune dead ones."""
     while True:
         try:
-            await asyncio.sleep(10)
+            await asyncio.sleep(60)
             await prune_dead_endpoints()
         except asyncio.CancelledError:
             break
@@ -448,21 +460,35 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
         if not ROUTER:
             raise HTTPException(status_code=503, detail="Gateway not ready")
         eff_threshold = threshold if threshold is not None else 0.3
-        return ROUTER.resolve(query, top_k=top_k, threshold=eff_threshold, exclude_node_id=exclude_node_id)
+        result = ROUTER.resolve(query, top_k=top_k, threshold=eff_threshold, exclude_node_id=exclude_node_id)
+        best = result.get("best")
+        if best:
+            add_system_log("DISCOVERY", best.get("skill", "unknown"), f"Semantic match for '{query[:80]}' → {best.get('skill')} (confidence: {best.get('confidence', 0):.2f})", {"query": query, "confidence": best.get("confidence"), "type": best.get("type"), "candidates": len(result.get("candidates", []))})
+        else:
+            add_system_log("DISCOVERY", "no_match", f"No match found for query: '{query[:80]}'", {"query": query, "type": result.get("type")})
+        return result
 
     @app.get("/resolve/agents")
     def resolve_agents(query: str, top_k: int = Query(3), threshold: Optional[float] = Query(None), exclude_node_id: Optional[str] = Query(None)):
         if not ROUTER:
             raise HTTPException(status_code=503, detail="Gateway not ready")
         eff_threshold = threshold if threshold is not None else 0.3
-        return ROUTER.resolve(query, top_k=top_k, threshold=eff_threshold, filter_type="agent", exclude_node_id=exclude_node_id)
+        result = ROUTER.resolve(query, top_k=top_k, threshold=eff_threshold, filter_type="agent", exclude_node_id=exclude_node_id)
+        best = result.get("best")
+        if best:
+            add_system_log("DISCOVERY", best.get("skill", "unknown"), f"Agent match for '{query[:80]}' → {best.get('skill')} (confidence: {best.get('confidence', 0):.2f})")
+        return result
 
     @app.get("/resolve/tools")
     def resolve_tools(query: str, top_k: int = Query(3), threshold: Optional[float] = Query(None), exclude_node_id: Optional[str] = Query(None)):
         if not ROUTER:
             raise HTTPException(status_code=503, detail="Gateway not ready")
         eff_threshold = threshold if threshold is not None else 0.3
-        return ROUTER.resolve(query, top_k=top_k, threshold=eff_threshold, filter_type="tool", exclude_node_id=exclude_node_id)
+        result = ROUTER.resolve(query, top_k=top_k, threshold=eff_threshold, filter_type="tool", exclude_node_id=exclude_node_id)
+        best = result.get("best")
+        if best:
+            add_system_log("DISCOVERY", best.get("skill", "unknown"), f"Tool match for '{query[:80]}' → {best.get('skill')} (confidence: {best.get('confidence', 0):.2f})")
+        return result
 
     @app.get("/public_key")
     def get_public_key():
