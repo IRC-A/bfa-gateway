@@ -1763,15 +1763,8 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
             add_system_log("ERROR", node_id or url, f"Failed dynamic discovery for Agent at {url}.")
             raise HTTPException(status_code=400, detail=f"Failed to discover agent at {url}")
             
-        # Check collision: Is the URL used by a DIFFERENT node?
+        # Update registration
         current_target_id = node_id or (list(new_agents.keys())[0] if new_agents else None)
-        for reg_id, reg_info in REGISTERED_NODES.items():
-            if reg_info.get("url") == url:
-                if reg_id != current_target_id and reg_id not in new_agents:
-                    raise HTTPException(
-                        status_code=409, 
-                        detail=f"Agent URL '{url}' is already registered by node '{reg_id}'"
-                    )
 
         # Extract prompt_hash from payload if present
         actual_prompt_hash = prompt_hash
@@ -1781,28 +1774,6 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
         channel_list = [ch.strip() for ch in channels.split(",") if ch.strip()]
         for skill_id, new_item in new_agents.items():
             target_id = node_id or skill_id
-            
-            # If target_id is registered under a DIFFERENT URL, it's a collision
-            if target_id in REGISTERED_NODES:
-                existing_url = REGISTERED_NODES[target_id].get("url")
-                if existing_url and existing_url != url:
-                    raise HTTPException(
-                        status_code=409, 
-                        detail=f"Agent '{target_id}' is already registered at URL '{existing_url}'"
-                    )
-
-            # Check semantic content collision with a DIFFERENT agent/node
-            for existing_id, existing_item in ROUTER.registry.items():
-                existing_node = existing_item.get("node_id") or existing_id
-                if existing_node != target_id and (
-                    existing_item.get("name") == new_item.get("name") and
-                    existing_item.get("description") == new_item.get("description")
-                ):
-                    raise HTTPException(
-                        status_code=409, 
-                        detail="An agent with identical semantic metadata is already registered"
-                    )
-
             new_agents[skill_id]["channels"] = channel_list
             new_agents[skill_id]["node_id"] = target_id
             if actual_prompt_hash:
@@ -1839,15 +1810,6 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
         if not ROUTER:
             raise HTTPException(status_code=503, detail="Gateway not ready")
             
-        current_target_id = node_id or url
-        # Check collision: Is the URL used by a DIFFERENT node?
-        for reg_id, reg_info in REGISTERED_NODES.items():
-            if reg_info.get("url") == url and reg_id != current_target_id:
-                raise HTTPException(
-                    status_code=409, 
-                    detail=f"MCP Server URL '{url}' is already registered by node '{reg_id}'"
-                )
-
         new_tools = await discover_tools([url])
         if not new_tools:
             add_system_log("ERROR", node_id or url, f"Failed dynamic discovery for MCP tools at {url}.")
@@ -1856,25 +1818,6 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
         channel_list = [ch.strip() for ch in channels.split(",") if ch.strip()]
         for tool_name, new_item in new_tools.items():
             target_id = node_id or url
-            if tool_name in ROUTER.registry:
-                existing_node = ROUTER.registry[tool_name].get("node_id") or ROUTER.registry[tool_name].get("server_url")
-                if existing_node and existing_node != target_id and existing_node != url:
-                    raise HTTPException(
-                        status_code=409, 
-                        detail=f"Tool '{tool_name}' is already registered by '{existing_node}'"
-                    )
-
-            # Check semantic content collision with a DIFFERENT tool/server
-            for existing_id, existing_item in ROUTER.registry.items():
-                existing_server = existing_item.get("server_url") or existing_item.get("node_id")
-                if existing_id != tool_name and existing_server and existing_server != url and (
-                    existing_item.get("name") == new_item.get("name") and
-                    existing_item.get("description") == new_item.get("description")
-                ):
-                    raise HTTPException(
-                        status_code=409, 
-                        detail="A tool with identical semantic metadata is already registered"
-                    )
 
             new_tools[tool_name]["channels"] = channel_list
             new_tools[tool_name]["node_id"] = node_id or url
