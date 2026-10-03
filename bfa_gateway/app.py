@@ -1989,8 +1989,10 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
             add_system_log("ERROR", node_id or url, f"Failed dynamic discovery for Agent at {url}.")
             raise HTTPException(status_code=400, detail=f"Failed to discover agent at {url}")
             
-        # Update registration
         current_target_id = node_id or (list(new_agents.keys())[0] if new_agents else None)
+        for reg_id, reg_info in REGISTERED_NODES.items():
+            if reg_info.get("url") == url and reg_id != current_target_id:
+                raise HTTPException(status_code=409, detail=f"URL '{url}' is already registered under node_id '{reg_id}'")
 
         # Extract prompt_hash from payload if present
         actual_prompt_hash = prompt_hash
@@ -2040,6 +2042,11 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
         if not new_tools:
             add_system_log("ERROR", node_id or url, f"Failed dynamic discovery for MCP tools at {url}.")
             raise HTTPException(status_code=400, detail=f"Failed to discover MCP tools at {url}")
+            
+        current_target_id = node_id or url
+        for reg_id, reg_info in REGISTERED_NODES.items():
+            if reg_info.get("url") == url and reg_id != current_target_id:
+                raise HTTPException(status_code=409, detail=f"URL '{url}' is already registered under node_id '{reg_id}'")
             
         channel_list = [ch.strip() for ch in channels.split(",") if ch.strip()]
         for tool_name, new_item in new_tools.items():
