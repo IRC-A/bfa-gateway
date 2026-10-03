@@ -1579,63 +1579,29 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
             "message": f"Node '{node_id}' successfully disconnected and removed from FAISS index."
         }
 
-    @app.post("/discover")
-    def discover(query: str = None, threshold: float = None, exclude_node_id: str = None, payload: Dict[str, Any] = None):
-        """
-        Secure semantic discovery (IRC-A Gateway broker).
-        Verifies session token, performs logical channel masking, excludes calling node ID if requested, and mints an ephemeral DET.
-        """
-        if payload is None:
-            payload = {}
-            
-        actual_query = query or payload.get("query")
-        if not actual_query:
-            raise HTTPException(status_code=400, detail="Missing query parameter or payload JSON")
-
-        auth_header = payload.get("session_token")
-        if not auth_header:
+    def verify_caller_session(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+        auth_header = request.headers.get("Authorization") or ""
+        session_token = None
+        if auth_header.startswith("Bearer "):
+            session_token = auth_header[7:].strip()
+        if not session_token:
+            session_token = payload.get("session_token") or request.query_params.get("session_token")
+        if not session_token:
             raise HTTPException(status_code=401, detail="Missing session_token")
             
         try:
-            decoded_session = verify_paseto_v4_public(auth_header, GATEWAY_PUBLIC_KEY)
-            caller_id = decoded_session["sub"]
-            caller_channels = decoded_session.get("channels", ["#public"])
+            decoded_session = verify_paseto_v4_public(session_token, GATEWAY_PUBLIC_KEY)
             if decoded_session.get("exp", 0) < time.time():
                 raise HTTPException(status_code=401, detail="Session token expired")
+            return decoded_session
         except HTTPException:
             raise
         except Exception as e:
             raise HTTPException(status_code=401, detail=f"Invalid session token: {e}")
-            
-        if not ROUTER:
-            raise HTTPException(status_code=503, detail="Gateway not ready")
-            
-        effective_exclude_id = exclude_node_id or payload.get("exclude_node_id") or caller_id
-            
-        req_threshold = threshold if threshold is not None else (payload.get("threshold") if payload.get("threshold") is not None else CONFIG.semantic_threshold)
 
-        result = ROUTER.resolve(
-            actual_query, 
-            threshold=req_threshold,
-            agent_channels=caller_channels, 
-            exclude_node_id=effective_exclude_id
-        )
-        best = result.get("best")
-        if not best:
-            add_system_log("DISCOVERY", caller_id, f"Failed discovery: No capability found matching query '{actual_query}' above threshold {req_threshold}.")
-            raise HTTPException(status_code=404, detail=f"No matching capability found above threshold {req_threshold}")
-            
-        target_node_id = best["skill"]
-        target_type = best["type"]
+    def _execute_authorization(caller_id: str, caller_channels: List[str], actual_query: str, target_node_id: str, target_type: str, best_data: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, Any]:
+        restricted_params = dict(args) if isinstance(args, dict) else {}
         
-        # Extract restricted parameters from incoming request payload or dynamic extractors
-        restricted_params = {}
-        if payload:
-            if "restricted_params" in payload and isinstance(payload["restricted_params"], dict):
-                restricted_params.update(payload["restricted_params"])
-            elif "params" in payload and isinstance(payload["params"], dict):
-                restricted_params.update(payload["params"])
-
         import re
         for param_name, pattern in DYNAMIC_PARAMETER_EXTRACTORS.items():
             if param_name not in restricted_params:
@@ -1643,19 +1609,18 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
                 if match:
                     restricted_params[param_name] = match.group(1)
 
-        # Retrieve prompt_hash if registered for target node
         target_prompt_hash = REGISTERED_NODES.get(target_node_id, {}).get("prompt_hash")
         if not target_prompt_hash:
-            target_prompt_hash = best["data"].get("prompt_hash")
+            target_prompt_hash = best_data.get("prompt_hash")
 
         import uuid
-        det_expiry = int(time.time()) + 60
+        det_expiry = int(time.time()) + 120
         det_claims = {
             "jti": str(uuid.uuid4()),
             "iss": "irca-gateway",
             "sub": caller_id,
             "aud": target_node_id,
-            "permitted_action": best["data"]["name"],
+            "permitted_action": best_data.get("name") or target_node_id,
             "restricted_params": restricted_params,
             "exp": det_expiry,
             "iat": int(time.time())
@@ -1668,10 +1633,9 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
             GATEWAY_PRIVATE_KEY
         )
         
-        target_url = best["data"].get("url") or best["data"].get("server_url")
+        target_url = best_data.get("url") or best_data.get("server_url") or ""
         base_tools_url = target_url.rstrip("/") + "/tools" if target_type == "tool" and not target_url.endswith("/tools") else target_url
 
-        # Build arguments for prepared execution call
         prepared_args = dict(restricted_params)
         prepared_args["delegated_token"] = det
 
@@ -1686,29 +1650,248 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
             "url": target_url,
             "method": "POST",
             "headers": {"Authorization": f"Bearer {det}"},
-            "body": {"query": query, "params": restricted_params}
+            "body": {"query": actual_query, "params": restricted_params}
         }
         
-        add_system_log("DISCOVERY", caller_id, f"Resolved query '{query}' -> target '{target_node_id}' ({target_url}). Mints DET token with restricted_params: {restricted_params}")
-        response_data = {
+        add_system_log("AUTHORIZATION", caller_id, f"Authorized intent '{actual_query}' -> target '{target_node_id}' ({target_url}). Mints DET token with restricted_params: {restricted_params}")
+        return {
             "status": "success",
             "det": det,
             "url": target_url,
+            "endpoint": target_url,
             "target_node_id": target_node_id,
             "type": target_type,
-            "input_schema": best["data"].get("input_schema", {}),
+            "expires_in": 120,
+            "input_schema": best_data.get("input_schema", {}),
             "restricted_params": restricted_params,
             "prepared_call": prepared_call
         }
-        print("\n" + "="*80)
-        print(f"=== [BFA GATEWAY /discover RESPUESTA EMITIDA] ===")
-        print(f"🔹 Caller ID       : {caller_id}")
-        print(f"🔹 Query           : {query}")
-        print(f"🔹 Target          : {target_node_id} ({target_type}) @ {target_url}")
-        print(f"🔹 Restricted Params: {json.dumps(restricted_params, ensure_ascii=False)}")
-        print(f"🔹 Prepared Call   : {json.dumps(prepared_call, ensure_ascii=False, indent=2)}")
-        print("="*80 + "\n")
-        return response_data
+
+    @app.post("/register")
+    async def register_generic(payload: Dict[str, Any]):
+        """
+        Generic dynamic capability registration endpoint (IRC-A Protocol v1.3.0 §4.2).
+        Registers nodes and capabilities along with their input_schema contracts.
+        """
+        if not ROUTER:
+            raise HTTPException(status_code=503, detail="Gateway not ready")
+            
+        node_id = payload.get("node_id")
+        type_ = payload.get("type", "tool_server")
+        url = payload.get("url") or payload.get("endpoint") or ""
+        channels = payload.get("channels", ["#public"])
+        capabilities = payload.get("capabilities", [])
+        
+        if not node_id:
+            raise HTTPException(status_code=400, detail="Missing node_id")
+
+        if isinstance(channels, str):
+            channel_list = [ch.strip() for ch in channels.split(",") if ch.strip()]
+        else:
+            channel_list = list(channels)
+
+        if node_id not in REGISTERED_NODES:
+            REGISTERED_NODES[node_id] = {}
+        REGISTERED_NODES[node_id]["url"] = url
+        REGISTERED_NODES[node_id]["channels"] = channel_list
+        if "prompt_hash" in payload:
+            REGISTERED_NODES[node_id]["prompt_hash"] = payload["prompt_hash"]
+
+        new_items = {}
+        is_tool = type_ in ("tool_server", "tool", "mcp")
+        
+        for cap in capabilities:
+            cap_name = cap.get("name") or cap.get("skill") or cap.get("id") or node_id
+            tags = cap.get("tags", [])
+            examples = cap.get("examples") or cap.get("usage_example", [])
+            if isinstance(examples, str):
+                examples = [examples]
+            new_items[cap_name] = {
+                "type": "tool" if is_tool else "agent",
+                "name": cap_name,
+                "description": cap.get("description", ""),
+                "tags": tags,
+                "examples": examples,
+                "input_schema": cap.get("input_schema", {}),
+                "url": url,
+                "server_url": url,
+                "channels": channel_list,
+                "node_id": node_id
+            }
+
+        if new_items:
+            ROUTER.update_registry(new_items)
+            ROUTER.build_index()
+            
+        if url:
+            persist_endpoint("mcp" if is_tool else "agent", url)
+
+        add_system_log("REGISTRATION", node_id, f"Registered node '{node_id}' with {len(capabilities)} capabilities on channels {channel_list}.")
+        return {
+            "status": "success",
+            "message": f"Successfully registered node '{node_id}'",
+            "registered_capabilities": list(new_items.keys())
+        }
+
+    @app.post("/discover")
+    def discover(
+        request: Request,
+        query: str = None, 
+        intent: str = None,
+        candidates: int = 1,
+        threshold: float = None, 
+        exclude_node_id: str = None, 
+        payload: Dict[str, Any] = None
+    ):
+        """
+        Phase 1 - Capability Inquiry (IRC-A Protocol v1.3.0 §4.3).
+        Pure, stateless, read-only capability lookup.
+        Asks the network: 'who can solve this, and what do they need (input_schema)?'
+        Signs no token and creates no server-side state.
+        """
+        if payload is None:
+            payload = {}
+            
+        actual_query = intent or query or payload.get("intent") or payload.get("query")
+        if not actual_query:
+            raise HTTPException(status_code=400, detail="Missing intent/query parameter or payload JSON")
+
+        decoded_session = verify_caller_session(request, payload)
+        caller_id = decoded_session["sub"]
+        caller_channels = decoded_session.get("channels", ["#public"])
+            
+        if not ROUTER:
+            raise HTTPException(status_code=503, detail="Gateway not ready")
+            
+        effective_exclude_id = exclude_node_id or payload.get("exclude_node_id") or caller_id
+        req_threshold = threshold if threshold is not None else (payload.get("threshold") if payload.get("threshold") is not None else CONFIG.semantic_threshold)
+        req_candidates = candidates or payload.get("candidates", 1)
+
+        result = ROUTER.resolve(
+            actual_query, 
+            top_k=max(1, req_candidates),
+            threshold=req_threshold,
+            agent_channels=caller_channels, 
+            exclude_node_id=effective_exclude_id
+        )
+        
+        # Check for legacy single-step discovery (if restricted_params/params/legacy are explicitly sent)
+        if "restricted_params" in payload or "params" in payload or payload.get("legacy") or request.query_params.get("legacy"):
+            best = result.get("best")
+            if not best:
+                add_system_log("DISCOVERY", caller_id, f"Failed discovery: No capability found matching query '{actual_query}' above threshold {req_threshold}.")
+                raise HTTPException(status_code=404, detail=f"No matching capability found above threshold {req_threshold}")
+            return _execute_authorization(
+                caller_id=caller_id,
+                caller_channels=caller_channels,
+                actual_query=actual_query,
+                target_node_id=best["skill"],
+                target_type=best["type"],
+                best_data=best["data"],
+                args=payload.get("restricted_params") or payload.get("params") or {}
+            )
+
+        # Standard Phase 1 Capability Inquiry (v1.3.0)
+        candidate_list = result.get("candidates", [])
+        if not candidate_list and result.get("best"):
+            candidate_list = [result.get("best")]
+
+        if not candidate_list:
+            add_system_log("DISCOVERY", caller_id, f"Failed inquiry: No capability found matching intent '{actual_query}' above threshold {req_threshold}.")
+            raise HTTPException(status_code=404, detail=f"No matching capability found above threshold {req_threshold}")
+
+        formatted_matches = []
+        for cand in candidate_list[:req_candidates]:
+            data = cand.get("data", {})
+            target_url = data.get("url") or data.get("server_url") or ""
+            formatted_matches.append({
+                "node_id": cand.get("skill") or data.get("node_id"),
+                "tool": data.get("name") or cand.get("skill"),
+                "endpoint": target_url,
+                "description": data.get("description", ""),
+                "input_schema": data.get("input_schema", {}),
+                "channels": data.get("channels", ["#public"]),
+                "confidence": cand.get("score") or cand.get("confidence")
+            })
+
+        add_system_log("DISCOVERY", caller_id, f"Phase 1 Inquiry for intent '{actual_query}' -> returned {len(formatted_matches)} matching capabilities.")
+        
+        if req_candidates == 1:
+            return {
+                "status": "success",
+                "match": formatted_matches[0]
+            }
+        else:
+            return {
+                "status": "success",
+                "candidates": formatted_matches
+            }
+
+    @app.post("/authorize")
+    def authorize(
+        request: Request,
+        payload: Dict[str, Any] = None
+    ):
+        """
+        Phase 2 - Authorization & DET Minting (IRC-A Protocol v1.3.0 §4.3).
+        Presents intent + concrete arguments gathered by the agent.
+        Re-evaluates channel masking and FAISS match, then mints an ephemeral DET
+        with `restricted_params` cryptographically locked to `args`.
+        """
+        if payload is None:
+            payload = {}
+            
+        actual_query = payload.get("intent") or payload.get("query")
+        target_tool = payload.get("tool") or payload.get("target") or payload.get("permitted_action")
+        args = payload.get("args") if "args" in payload else (payload.get("restricted_params") or payload.get("params") or {})
+        
+        if not actual_query:
+            raise HTTPException(status_code=400, detail="Missing intent/query parameter or payload JSON")
+
+        decoded_session = verify_caller_session(request, payload)
+        caller_id = decoded_session["sub"]
+        caller_channels = decoded_session.get("channels", ["#public"])
+            
+        if not ROUTER:
+            raise HTTPException(status_code=503, detail="Gateway not ready")
+
+        effective_exclude_id = payload.get("exclude_node_id") or caller_id
+        req_threshold = payload.get("threshold") if payload.get("threshold") is not None else CONFIG.semantic_threshold
+
+        result = ROUTER.resolve(
+            actual_query,
+            threshold=req_threshold,
+            agent_channels=caller_channels, 
+            exclude_node_id=effective_exclude_id
+        )
+        best = result.get("best")
+        if not best:
+            add_system_log("AUTHORIZATION", caller_id, f"Failed authorization: No capability found matching intent '{actual_query}'.")
+            raise HTTPException(status_code=404, detail=f"No matching capability found for authorization above threshold {req_threshold}")
+
+        target_node_id = best["skill"]
+        target_type = best["type"]
+        best_data = best["data"]
+
+        # If specific tool requested, confirm match or override if valid in registry
+        if target_tool and target_tool != best_data.get("name") and target_tool != target_node_id:
+            if target_tool in ROUTER.registry:
+                reg_item = ROUTER.registry[target_tool]
+                item_channels = reg_item.get("channels", ["#public"])
+                if any(ch in item_channels for ch in caller_channels):
+                    target_node_id = target_tool
+                    target_type = reg_item.get("type", "tool")
+                    best_data = reg_item
+
+        return _execute_authorization(
+            caller_id=caller_id,
+            caller_channels=caller_channels,
+            actual_query=actual_query,
+            target_node_id=target_node_id,
+            target_type=target_type,
+            best_data=best_data,
+            args=args
+        )
  
     @app.post("/mint")
     def mint_token(payload: Dict[str, Any]):

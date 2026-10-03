@@ -527,3 +527,97 @@ def test_gateway_register_mcp_collisions(mock_discover_agents, mock_discover_too
         gateway_mod.ROUTER.index = None
         gateway_mod.ROUTER.index_keys = []
 
+
+def test_two_phase_capability_negotiation_discover_and_authorize(mock_gateway_setup):
+    """
+    Test Whitepaper v1.3.0 Two-Phase Capability Negotiation:
+    Phase 1: /discover (stateless inquiry returning match + input_schema without DET)
+    Phase 2: /authorize (presenting args and minting ephemeral DET with restricted_params)
+    """
+    from bfa_gateway.app import GATEWAY_PUBLIC_KEY, GATEWAY_PRIVATE_KEY
+    from bfa_gateway.paseto import sign_paseto_v4_public, verify_paseto_v4_public
+    import time
+    
+    config = BFAConfig()
+    app = create_gateway_app(config)
+    
+    with TestClient(app) as client:
+        # 1. Register an MCP Tool node with input_schema via generic /register
+        register_payload = {
+            "node_id": "bank-data-river",
+            "type": "tool_server",
+            "url": "http://127.0.0.1:8102",
+            "channels": ["#finance"],
+            "capabilities": [
+                {
+                    "name": "fetch_customer_credit_score",
+                    "description": "Queries credit rating indexes securely for a mortgage applicant",
+                    "tags": ["credit", "score", "finance"],
+                    "usage_example": "Fetch credit rating score for customer ID 882",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "customer_id": {"type": "string", "description": "Customer ID"}
+                        },
+                        "required": ["customer_id"]
+                    }
+                }
+            ]
+        }
+        reg_res = client.post("/register", json=register_payload)
+        assert reg_res.status_code == 200
+        assert reg_res.json()["status"] == "success"
+        
+        # 2. Generate mock Session Token for calling agent
+        session_token = sign_paseto_v4_public(
+            {
+                "sub": "credit_agent",
+                "channels": ["#finance", "#public"],
+                "exp": int(time.time()) + 3600
+            },
+            GATEWAY_PRIVATE_KEY
+        )
+        
+        # 3. Phase 1 — Capability Inquiry (/discover)
+        discover_res = client.post(
+            "/discover",
+            headers={"Authorization": f"Bearer {session_token}"},
+            json={"intent": "check financial credit score of applicant"}
+        )
+        assert discover_res.status_code == 200
+        data_p1 = discover_res.json()
+        assert data_p1["status"] == "success"
+        assert "match" in data_p1
+        match = data_p1["match"]
+        assert match["tool"] == "fetch_customer_credit_score"
+        assert match["endpoint"] == "http://127.0.0.1:8102"
+        assert match["input_schema"]["properties"]["customer_id"]["type"] == "string"
+        # Verify NO DET token is returned in Phase 1 inquiry
+        assert "det" not in data_p1
+        
+        # 4. Phase 2 — Authorization & DET Minting (/authorize)
+        authorize_res = client.post(
+            "/authorize",
+            headers={"Authorization": f"Bearer {session_token}"},
+            json={
+                "intent": "check financial credit score of applicant",
+                "tool": "fetch_customer_credit_score",
+                "args": {"customer_id": "882"}
+            }
+        )
+        assert authorize_res.status_code == 200
+        data_p2 = authorize_res.json()
+        assert data_p2["status"] == "success"
+        assert "det" in data_p2
+        assert data_p2["endpoint"] == "http://127.0.0.1:8102"
+        assert data_p2["expires_in"] == 120
+        assert data_p2["restricted_params"] == {"customer_id": "882"}
+        
+        # 5. Decode and verify DET PASETO Token signature & claims
+        decoded_det = verify_paseto_v4_public(data_p2["det"], GATEWAY_PUBLIC_KEY)
+        assert decoded_det["sub"] == "credit_agent"
+        assert decoded_det["aud"] == "fetch_customer_credit_score"
+        assert decoded_det["permitted_action"] == "fetch_customer_credit_score"
+        assert decoded_det["restricted_params"] == {"customer_id": "882"}
+
+
