@@ -1994,6 +1994,18 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
             if reg_info.get("url") == url and reg_id != current_target_id:
                 raise HTTPException(status_code=409, detail=f"URL '{url}' is already registered under node_id '{reg_id}'")
 
+        if ROUTER:
+            for existing_id, existing_item in ROUTER.registry.items():
+                existing_node = existing_item.get("node_id") or existing_item.get("url")
+                if existing_node != current_target_id:
+                    for new_id, new_item in new_agents.items():
+                        if (existing_item.get("name") == new_item.get("name") and
+                            existing_item.get("description") == new_item.get("description")):
+                            raise HTTPException(
+                                status_code=409,
+                                detail=f"A node with identical semantic metadata is already registered under node_id '{existing_node}'"
+                            )
+
         # Extract prompt_hash from payload if present
         actual_prompt_hash = prompt_hash
         if not actual_prompt_hash and payload:
@@ -2047,6 +2059,18 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
         for reg_id, reg_info in REGISTERED_NODES.items():
             if reg_info.get("url") == url and reg_id != current_target_id:
                 raise HTTPException(status_code=409, detail=f"URL '{url}' is already registered under node_id '{reg_id}'")
+
+        if ROUTER:
+            for existing_id, existing_item in ROUTER.registry.items():
+                existing_node = existing_item.get("node_id") or existing_item.get("server_url")
+                if existing_node != current_target_id:
+                    for new_id, new_item in new_tools.items():
+                        if (existing_item.get("name") == new_item.get("name") and
+                            existing_item.get("description") == new_item.get("description")):
+                            raise HTTPException(
+                                status_code=409,
+                                detail=f"A node with identical semantic metadata is already registered under node_id '{existing_node}'"
+                            )
             
         channel_list = [ch.strip() for ch in channels.split(",") if ch.strip()]
         for tool_name, new_item in new_tools.items():
