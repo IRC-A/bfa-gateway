@@ -2216,6 +2216,7 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
                 "node_id": cand.get("skill") or data.get("node_id"),
                 "tool": data.get("name") or cand.get("skill"),
                 "endpoint": target_url,
+                "type": cand.get("type", "agent"),
                 "description": data.get("description", ""),
                 "input_schema": data.get("input_schema", {}),
                 "channels": data.get("channels", ["#public"]),
