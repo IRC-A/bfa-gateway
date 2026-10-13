@@ -1920,6 +1920,21 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
                 norm = "https://127.0.0.1" + norm[len(host):]
         return norm
 
+    def _remove_persisted_endpoint(url_to_remove: str):
+        if not url_to_remove:
+            return
+        try:
+            reg = BFAStorageManager.load_registry()
+            changed = False
+            for k in ("agent_endpoints", "mcp_endpoints"):
+                if url_to_remove in reg.get(k, []):
+                    reg[k].remove(url_to_remove)
+                    changed = True
+            if changed:
+                BFAStorageManager.save_registry(reg)
+        except Exception:
+            pass
+
     @app.post("/register/disconnect")
     def register_disconnect(payload: Dict[str, Any]):
         """
@@ -1938,8 +1953,7 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
             if reg_id == node_id or reg_url == node_id or (norm_target and reg_url and _normalize_local_url(reg_url) == norm_target):
                 matched_node_ids.add(reg_id)
                 if reg_url:
-                    STORAGE_MANAGER.remove_endpoint("agent", reg_url)
-                    STORAGE_MANAGER.remove_endpoint("mcp", reg_url)
+                    _remove_persisted_endpoint(reg_url)
                 del REGISTERED_NODES[reg_id]
             
         # 2. Remove associated capabilities from semantic search registry
@@ -1954,8 +1968,7 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
                     (norm_target and val_url and _normalize_local_url(val_url) == norm_target)):
                     keys_to_remove.append(key)
                     if val_url:
-                        STORAGE_MANAGER.remove_endpoint("agent", val_url)
-                        STORAGE_MANAGER.remove_endpoint("mcp", val_url)
+                        _remove_persisted_endpoint(val_url)
                 elif value.get("type") == "agent" and any(key.startswith(m_id) for m_id in matched_node_ids):
                     keys_to_remove.append(key)
                     
@@ -2379,7 +2392,7 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
                 if reg_info.get("prompt_hash"):
                     preserved_prompt_hash = reg_info["prompt_hash"]
                 if reg_url and reg_url != url:
-                    STORAGE_MANAGER.remove_endpoint("agent", reg_url)
+                    _remove_persisted_endpoint(reg_url)
                 del REGISTERED_NODES[reg_id]
 
         for existing_id, existing_item in list(ROUTER.registry.items()):
@@ -2387,7 +2400,7 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
             existing_url = existing_item.get("url") or ""
             if existing_id in target_ids_to_clean or existing_node in target_ids_to_clean or (norm_url and existing_url and _normalize_local_url(existing_url) == norm_url):
                 if existing_url and existing_url != url:
-                    STORAGE_MANAGER.remove_endpoint("agent", existing_url)
+                    _remove_persisted_endpoint(existing_url)
                 del ROUTER.registry[existing_id]
 
         # Extract prompt_hash from payload if present
@@ -2476,7 +2489,7 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
                 if reg_info.get("public_key"):
                     preserved_pubkey = reg_info["public_key"]
                 if reg_url and reg_url != url:
-                    STORAGE_MANAGER.remove_endpoint("mcp", reg_url)
+                    _remove_persisted_endpoint(reg_url)
                 del REGISTERED_NODES[reg_id]
 
         for existing_id, existing_item in list(ROUTER.registry.items()):
@@ -2488,7 +2501,7 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
                 if not effective_node_id and existing_node and not existing_node.startswith("http"):
                     effective_node_id = existing_node
                 if existing_server and existing_server != url:
-                    STORAGE_MANAGER.remove_endpoint("mcp", existing_server)
+                    _remove_persisted_endpoint(existing_server)
                 del ROUTER.registry[existing_id]
 
         target_id = effective_node_id or url
