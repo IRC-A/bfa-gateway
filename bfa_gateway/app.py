@@ -285,6 +285,7 @@ async def discover_tools(endpoints: List[str]) -> Dict[str, Any]:
                             "name": tool_name,
                             "description": tool.get("description", ""),
                             "input_schema": tool.get("inputSchema", {}),
+                            "output_schema": tool.get("outputSchema") or tool.get("output_schema") or {},
                             "tags": tags,
                             "examples": examples,
                         }
@@ -2264,6 +2265,7 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
                 "type": cand.get("type", "agent"),
                 "description": data.get("description", ""),
                 "input_schema": data.get("input_schema", {}),
+                "output_schema": data.get("output_schema", {}),
                 "channels": data.get("channels", ["#public"]),
                 "confidence": cand.get("score") or cand.get("confidence")
             })
