@@ -2704,7 +2704,7 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
                 "message": {
                     "role": 1, # ROLE_USER
                     "message_id": "bfa-msg-id",
-                    "context_id": "bfa-session-id",
+                    "context_id": (payload.get("session_id") or payload.get("context_id") or "bfa-session-id") if payload else "bfa-session-id",
                     "parts": [
                         {
                             "text": query
