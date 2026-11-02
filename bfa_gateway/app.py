@@ -2219,15 +2219,58 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
         req_filter_type = filter_type or payload.get("filter_type") or payload.get("type")
         req_prefer = prefer or payload.get("prefer") or "agent"
 
-        result = ROUTER.resolve(
-            actual_query, 
-            top_k=max(1, req_candidates),
-            threshold=req_threshold,
-            filter_type=req_filter_type,
-            prefer=req_prefer,
-            agent_channels=caller_channels, 
-            exclude_node_id=effective_exclude_id
+        # Hybrid Directed Fast-Path: caller explicitly specifies target_node or target_tool
+        direct_target = (
+            payload.get("target_node")
+            or payload.get("target_tool")
+            or payload.get("target")
+            or request.query_params.get("target_node")
+            or request.query_params.get("target_tool")
+            or request.query_params.get("target")
         )
+        direct_match = None
+        if direct_target and ROUTER:
+            if direct_target in ROUTER.registry:
+                direct_match = ROUTER.registry[direct_target]
+            else:
+                for k, v in ROUTER.registry.items():
+                    if v.get("node_id") == direct_target or v.get("name") == direct_target or k == direct_target:
+                        direct_match = v
+                        break
+
+            if direct_match:
+                norm_caller_channels = {str(c).strip().lstrip("#").lower() for c in caller_channels if c}
+                norm_item_channels = {str(c).strip().lstrip("#").lower() for c in direct_match.get("channels", ["#public"]) if c}
+                item_is_public = not norm_item_channels or "public" in norm_item_channels
+                has_channel_overlap = bool(norm_caller_channels.intersection(norm_item_channels))
+                if item_is_public or has_channel_overlap:
+                    matched_skill = direct_match.get("node_id") or direct_target
+                    cand = {
+                        "skill": matched_skill,
+                        "distance": 0.0,
+                        "confidence": 1.0,
+                        "score": 1.0,
+                        "type": direct_match.get("type", "agent"),
+                        "data": direct_match
+                    }
+                    result = {
+                        "type": direct_match.get("type", "agent"),
+                        "best": cand,
+                        "candidates": [cand]
+                    }
+                else:
+                    direct_match = None
+
+        if not direct_match:
+            result = ROUTER.resolve(
+                actual_query, 
+                top_k=max(1, req_candidates),
+                threshold=req_threshold,
+                filter_type=req_filter_type,
+                prefer=req_prefer,
+                agent_channels=caller_channels, 
+                exclude_node_id=effective_exclude_id
+            )
         
         # Check for legacy single-step discovery (if restricted_params/params/legacy are explicitly sent)
         if "restricted_params" in payload or "params" in payload or payload.get("legacy") or request.query_params.get("legacy"):
@@ -2337,6 +2380,36 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
         effective_exclude_id = list(all_exclusions)
         req_threshold = payload.get("threshold") if payload.get("threshold") is not None else CONFIG.semantic_threshold
 
+        # Hybrid Directed Authorization Fast-Path: if direct tool or target_node was requested
+        target_direct = target_tool or payload.get("target_node")
+        direct_reg_item = None
+        if target_direct and ROUTER:
+            if target_direct in ROUTER.registry:
+                direct_reg_item = ROUTER.registry[target_direct]
+            else:
+                for k, v in ROUTER.registry.items():
+                    if v.get("node_id") == target_direct or v.get("name") == target_direct or k == target_direct:
+                        direct_reg_item = v
+                        break
+
+        if direct_reg_item:
+            norm_caller_channels = {str(c).strip().lstrip("#").lower() for c in caller_channels if c}
+            norm_item_channels = {str(c).strip().lstrip("#").lower() for c in direct_reg_item.get("channels", ["#public"]) if c}
+            item_is_public = not norm_item_channels or "public" in norm_item_channels
+            has_channel_overlap = bool(norm_caller_channels.intersection(norm_item_channels))
+            if item_is_public or has_channel_overlap:
+                target_node_id = direct_reg_item.get("node_id") or target_direct
+                target_type = direct_reg_item.get("type", "tool")
+                return _execute_authorization(
+                    caller_id=caller_id,
+                    caller_channels=caller_channels,
+                    actual_query=actual_query,
+                    target_node_id=target_node_id,
+                    target_type=target_type,
+                    best_data=direct_reg_item,
+                    args=args
+                )
+
         result = ROUTER.resolve(
             actual_query,
             threshold=req_threshold,
@@ -2358,8 +2431,9 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
         if target_tool and target_tool != best_data.get("name") and target_tool != target_node_id:
             if target_tool in ROUTER.registry:
                 reg_item = ROUTER.registry[target_tool]
-                item_channels = reg_item.get("channels", ["#public"])
-                if any(ch in item_channels for ch in caller_channels):
+                norm_caller_channels = {str(c).strip().lstrip("#").lower() for c in caller_channels if c}
+                norm_item_channels = {str(c).strip().lstrip("#").lower() for c in reg_item.get("channels", ["#public"]) if c}
+                if not norm_item_channels or "public" in norm_item_channels or bool(norm_caller_channels.intersection(norm_item_channels)):
                     target_node_id = target_tool
                     target_type = reg_item.get("type", "tool")
                     best_data = reg_item
