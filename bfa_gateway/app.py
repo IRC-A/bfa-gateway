@@ -2685,7 +2685,8 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
         target_node: Optional[str] = None,
         authorization: Optional[str] = Header(None, alias="Authorization"),
         x_channels: Optional[str] = Header(None, alias="x-channels"),
-        x_node_id: Optional[str] = Header(None, alias="x-node-id")
+        x_node_id: Optional[str] = Header(None, alias="x-node-id"),
+        x_visited_nodes: Optional[str] = Header(None, alias="x-visited-nodes")
     ):
         """
         Semantically select the best agent and forward the JSON-RPC execution.
@@ -2731,6 +2732,19 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
         if not caller_channels:
             caller_channels = ["#public"]
 
+        # Collect caller exclusions and visited nodes to prevent circular loops and cross-role leakage
+        visited_nodes = [x.strip() for x in (x_visited_nodes or "").split(",") if x.strip()]
+        raw_exclude = (payload.get("exclude_nodes") if payload else None) or (payload.get("exclude_node_id") if payload else None)
+        exclude_list = []
+        if isinstance(raw_exclude, list):
+            exclude_list.extend(raw_exclude)
+        elif isinstance(raw_exclude, str):
+            exclude_list.extend([x.strip() for x in raw_exclude.split(",") if x.strip()])
+        all_exclusions = set(visited_nodes) | set(exclude_list)
+        if caller_id:
+            all_exclusions.add(caller_id)
+        effective_exclude_id = list(all_exclusions)
+
         # Fast-Path directed target_node (§4.3 IRC-A)
         target_direct = target_node or (payload.get("target_node") if payload else None)
         best = None
@@ -2747,7 +2761,7 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
                 threshold=req_threshold, 
                 filter_type="agent",
                 agent_channels=caller_channels,
-                exclude_node_id=caller_id
+                exclude_node_id=effective_exclude_id
             )
             best = result.get("best")
         
