@@ -2682,12 +2682,14 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
     async def invoke(
         query: str, 
         payload: Dict[str, Any] = None,
+        target_node: Optional[str] = None,
         authorization: Optional[str] = Header(None, alias="Authorization"),
         x_channels: Optional[str] = Header(None, alias="x-channels"),
         x_node_id: Optional[str] = Header(None, alias="x-node-id")
     ):
         """
         Semantically select the best agent and forward the JSON-RPC execution.
+        Supports Fast-Path direct invocation via target_node (§4.3 IRC-A).
         Enforces Logical Channel Masking and caller loop prevention if caller session or channels are provided.
         """
         if not ROUTER:
@@ -2729,15 +2731,25 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
         if not caller_channels:
             caller_channels = ["#public"]
 
-        req_threshold = payload.get("threshold") if (payload and payload.get("threshold") is not None) else CONFIG.semantic_threshold
-        result = ROUTER.resolve(
-            query, 
-            threshold=req_threshold, 
-            filter_type="agent",
-            agent_channels=caller_channels,
-            exclude_node_id=caller_id
-        )
-        best = result.get("best")
+        # Fast-Path directed target_node (§4.3 IRC-A)
+        target_direct = target_node or (payload.get("target_node") if payload else None)
+        best = None
+        if target_direct and target_direct in REGISTERED_NODES:
+            node_data = REGISTERED_NODES[target_direct]
+            best = {
+                "skill": target_direct,
+                "data": node_data
+            }
+        else:
+            req_threshold = payload.get("threshold") if (payload and payload.get("threshold") is not None) else CONFIG.semantic_threshold
+            result = ROUTER.resolve(
+                query, 
+                threshold=req_threshold, 
+                filter_type="agent",
+                agent_channels=caller_channels,
+                exclude_node_id=caller_id
+            )
+            best = result.get("best")
         
         if not best:
             raise HTTPException(status_code=404, detail=f"No matching agent found above threshold {req_threshold}.")
