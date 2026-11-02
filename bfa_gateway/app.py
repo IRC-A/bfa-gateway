@@ -2381,7 +2381,7 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
         req_threshold = payload.get("threshold") if payload.get("threshold") is not None else CONFIG.semantic_threshold
 
         # Hybrid Directed Authorization Fast-Path: if direct tool or target_node was requested
-        target_direct = target_tool or payload.get("target_node")
+        target_direct = payload.get("target_node") or (target_tool if target_tool != "SendMessage" else None) or payload.get("target")
         direct_reg_item = None
         if target_direct and ROUTER:
             if target_direct in ROUTER.registry:
@@ -2399,7 +2399,7 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
             has_channel_overlap = bool(norm_caller_channels.intersection(norm_item_channels))
             if item_is_public or has_channel_overlap:
                 target_node_id = direct_reg_item.get("node_id") or target_direct
-                target_type = direct_reg_item.get("type", "tool")
+                target_type = direct_reg_item.get("type", "agent")
                 return _execute_authorization(
                     caller_id=caller_id,
                     caller_channels=caller_channels,
