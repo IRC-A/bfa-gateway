@@ -10,6 +10,7 @@ import os
 import time
 import secrets
 import jwt
+import hashlib
 from typing import Dict, Any, List, Optional
 from a2a.client import A2ACardResolver
 from cryptography.hazmat.primitives.asymmetric import ed25519
@@ -294,33 +295,67 @@ async def discover_tools(endpoints: List[str]) -> Dict[str, Any]:
     return registry
 
 
+def _compute_skills_hash(skills_dict: Dict[str, Any], channels: Optional[List[str]] = None, url: str = "") -> str:
+    """Computes a deterministic hash of capability metadata to detect schema/description changes."""
+    canonical = []
+    for k in sorted(skills_dict.keys()):
+        item = skills_dict[k]
+        canonical.append({
+            "id": k,
+            "name": str(item.get("name", "")),
+            "description": str(item.get("description", "")),
+            "tags": sorted([str(t) for t in item.get("tags", [])]),
+            "examples": sorted([str(e) for e in item.get("examples", [])]),
+            "type": str(item.get("type", "agent")),
+            "channels": sorted([str(c) for c in (item.get("channels") or channels or [])]),
+            "url": str(item.get("url") or item.get("server_url") or url or ""),
+            "input_schema": item.get("input_schema") or item.get("inputSchema") or {},
+            "output_schema": item.get("output_schema") or item.get("outputSchema") or {}
+        })
+    return hashlib.sha256(json.dumps(canonical, sort_keys=True).encode("utf-8")).hexdigest()
+
+
 async def prune_dead_endpoints():
     """
-    Actively pings all registered endpoints. If an agent or MCP server is unreachable on TWO consecutive checks,
-    automatically unregister it, purge it from FAISS, and persist the update.
+    Background health monitor for registered endpoints.
+    - Respects passive heartbeats: skips pinging nodes that sent a heartbeat recently (< 90s).
+    - Throttles concurrent pings using an asyncio.Semaphore(2) to prevent CPU/network spikes.
+    - Uses 10.0s timeout per check.
+    - Failure threshold: marks node as 'degraded' at 3 consecutive misses; only purges from FAISS after 10 consecutive misses.
     """
     if not hasattr(prune_dead_endpoints, '_fail_counts'):
         prune_dead_endpoints._fail_counts = {}
     
-    if not ROUTER or not getattr(CONFIG, "enable_active_pruning", True):
+    active_pruning = os.getenv("BFA_ENABLE_ACTIVE_PRUNING", "false").lower() in ("true", "1")
+    if not ROUTER or not getattr(CONFIG, "enable_active_pruning", True) or not active_pruning:
         return
         
+    now = time.time()
+    # If node has sent a heartbeat recently (< 90s), consider it healthy and reset failure count
+    recent_heartbeat_urls = set()
+    for node_id, data in list(REGISTERED_NODES.items()):
+        if data.get("url") and (now - data.get("last_seen", 0)) < 90:
+            recent_heartbeat_urls.add(data["url"])
+            prune_dead_endpoints._fail_counts[data["url"]] = 0
+
     urls_to_check = set()
     for key, item in list(ROUTER.registry.items()):
         url = item.get("url") or item.get("server_url")
-        if url:
+        if url and url not in recent_heartbeat_urls:
             urls_to_check.add(url)
             
     for node_id, data in list(REGISTERED_NODES.items()):
-        if data.get("url"):
+        if data.get("url") and data["url"] not in recent_heartbeat_urls:
             urls_to_check.add(data["url"])
             
     if not urls_to_check:
         return
         
+    sem = asyncio.Semaphore(2)
     dead_urls = set()
-    async with httpx.AsyncClient(timeout=3.0) as client:
-        for url in urls_to_check:
+
+    async def _ping_url(url: str, client: httpx.AsyncClient):
+        async with sem:
             try:
                 if os.path.exists("/.dockerenv"):
                     check_url = url.replace("127.0.0.1", "host.docker.internal").replace("localhost", "host.docker.internal")
@@ -347,12 +382,23 @@ async def prune_dead_endpoints():
                     prune_dead_endpoints._fail_counts[url] = prune_dead_endpoints._fail_counts.get(url, 0) + 1
                 else:
                     prune_dead_endpoints._fail_counts[url] = 0
+                    for nid, d in REGISTERED_NODES.items():
+                        if d.get("url") == url and d.get("status") != "healthy":
+                            d["status"] = "healthy"
             except Exception:
                 prune_dead_endpoints._fail_counts[url] = prune_dead_endpoints._fail_counts.get(url, 0) + 1
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        await asyncio.gather(*[_ping_url(u, client) for u in urls_to_check], return_exceptions=True)
     
-    # Remove after 2 consecutive failures
+    # Evaluate failure counts:
     for url, count in list(prune_dead_endpoints._fail_counts.items()):
-        if count >= 2:
+        if count >= 3:
+            for nid, d in REGISTERED_NODES.items():
+                if d.get("url") == url and d.get("status") != "degraded":
+                    d["status"] = "degraded"
+                    add_system_log("HEALTH", nid, f"Endpoint '{url}' missed health checks ({count}/10). Status set to degraded.")
+        if count >= 10:
             dead_urls.add(url)
                 
     if dead_urls:
@@ -377,7 +423,7 @@ async def prune_dead_endpoints():
             reg["mcp_endpoints"] = [u for u in reg.get("mcp_endpoints", []) if u != dead_url]
             BFAStorageManager.save_registry(reg)
             
-            add_system_log("DISCOVERY", dead_url, f"Endpoint '{dead_url}' is dead/unreachable. Automatically unindexed from FAISS.")
+            add_system_log("DISCOVERY", dead_url, f"Endpoint '{dead_url}' is dead/unreachable after 10 consecutive failures. Automatically unindexed from FAISS.")
             prune_dead_endpoints._fail_counts.pop(dead_url, None)
             
         if removed_count > 0 and ROUTER:
@@ -385,18 +431,18 @@ async def prune_dead_endpoints():
 
 
 async def health_monitor_loop():
-    """Background task to continuously monitor registered nodes and prune dead ones."""
+    """Background task to monitor registered nodes without aggressive polling."""
     while True:
         try:
-            await prune_dead_endpoints()
-            await asyncio.sleep(10)
+            active_pruning = os.getenv("BFA_ENABLE_ACTIVE_PRUNING", "false").lower() in ("true", "1")
+            if active_pruning:
+                await prune_dead_endpoints()
+            await asyncio.sleep(45)
         except asyncio.CancelledError:
             break
         except Exception as e:
             print(f"Health monitor loop error: {e}")
-            await asyncio.sleep(10)
-        except Exception as e:
-            print(f"BFA Health Monitor Error: {e}")
+            await asyncio.sleep(45)
 
 
 @asynccontextmanager
@@ -504,7 +550,6 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
 
     @app.get("/skills")
     async def get_skills():
-        await prune_dead_endpoints()
         registry = {}
         if ROUTER:
             for k, item in ROUTER.registry.items():
@@ -536,7 +581,6 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
     async def resolve(query: str, top_k: int = Query(3), threshold: Optional[float] = Query(None), prefer: Optional[str] = Query("agent"), exclude_node_id: Optional[str] = Query(None)):
         if not ROUTER:
             raise HTTPException(status_code=503, detail="Gateway not ready")
-        await prune_dead_endpoints()
         eff_threshold = threshold if threshold is not None else 0.3
         result = ROUTER.resolve(query, top_k=top_k, threshold=eff_threshold, prefer=prefer, exclude_node_id=exclude_node_id)
         best = result.get("best")
@@ -550,7 +594,6 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
     async def resolve_agents(query: str, top_k: int = Query(3), threshold: Optional[float] = Query(None), exclude_node_id: Optional[str] = Query(None)):
         if not ROUTER:
             raise HTTPException(status_code=503, detail="Gateway not ready")
-        await prune_dead_endpoints()
         eff_threshold = threshold if threshold is not None else 0.3
         result = ROUTER.resolve(query, top_k=top_k, threshold=eff_threshold, filter_type="agent", exclude_node_id=exclude_node_id)
         best = result.get("best")
@@ -562,7 +605,6 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
     async def resolve_tools(query: str, top_k: int = Query(3), threshold: Optional[float] = Query(None), exclude_node_id: Optional[str] = Query(None)):
         if not ROUTER:
             raise HTTPException(status_code=503, detail="Gateway not ready")
-        await prune_dead_endpoints()
         eff_threshold = threshold if threshold is not None else 0.3
         result = ROUTER.resolve(query, top_k=top_k, threshold=eff_threshold, filter_type="tool", exclude_node_id=exclude_node_id)
         best = result.get("best")
@@ -1851,6 +1893,40 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
             "dynamic_mcp_endpoints": persisted["mcp_endpoints"]
         }
 
+    @app.post("/heartbeat")
+    async def heartbeat(payload: Dict[str, Any]):
+        """
+        Passive heartbeat endpoint for agents and MCP servers.
+        Updates last_seen and health status in-memory with near-zero CPU footprint.
+        """
+        node_id = payload.get("node_id")
+        if not node_id:
+            raise HTTPException(status_code=400, detail="Missing node_id")
+
+        session_token = payload.get("session_token")
+        if session_token and str(session_token).startswith("v4.public."):
+            try:
+                claims = verify_paseto_v4_public(session_token, GATEWAY_PUBLIC_KEY)
+                if claims.get("sub") != node_id:
+                    raise HTTPException(status_code=403, detail="Session token subject mismatch")
+            except Exception:
+                raise HTTPException(status_code=401, detail="Invalid session token in heartbeat")
+
+        now = time.time()
+        if node_id in REGISTERED_NODES:
+            REGISTERED_NODES[node_id]["last_seen"] = now
+            REGISTERED_NODES[node_id]["status"] = "healthy"
+            url = REGISTERED_NODES[node_id].get("url")
+            if url and hasattr(prune_dead_endpoints, "_fail_counts"):
+                prune_dead_endpoints._fail_counts[url] = 0
+        else:
+            REGISTERED_NODES[node_id] = {
+                "last_seen": now,
+                "status": "healthy"
+            }
+
+        return {"status": "ok", "node_id": node_id, "timestamp": now}
+
     @app.post("/register/init")
     def register_init(payload: Dict[str, Any]):
         node_id = payload.get("node_id")
@@ -1861,14 +1937,18 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
             
         challenge_bytes = secrets.token_hex(32)
         CHALLENGES[node_id] = challenge_bytes
+        existing_info = REGISTERED_NODES.get(node_id, {})
         REGISTERED_NODES[node_id] = {
+            **existing_info,
             "channels": channels,
-            "public_key": None,
-            "prompt_hash": prompt_hash,
-            "name": payload.get("name"),
-            "description": payload.get("description"),
-            "tags": payload.get("tags", []),
-            "examples": payload.get("examples", [])
+            "public_key": existing_info.get("public_key"),
+            "prompt_hash": prompt_hash or existing_info.get("prompt_hash"),
+            "name": payload.get("name") or existing_info.get("name"),
+            "description": payload.get("description") or existing_info.get("description"),
+            "tags": payload.get("tags") or existing_info.get("tags", []),
+            "examples": payload.get("examples") or existing_info.get("examples", []),
+            "status": "healthy",
+            "last_seen": time.time(),
         }
         add_system_log("REGISTRATION", node_id, "Initiated challenge-response handshake.")
         return {"challenge_bytes": challenge_bytes}
@@ -1902,6 +1982,8 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=f"Failed to verify signature: {e}")
             
         REGISTERED_NODES[node_id]["public_key"] = pubkey
+        REGISTERED_NODES[node_id]["status"] = "healthy"
+        REGISTERED_NODES[node_id]["last_seen"] = time.time()
         if prompt_hash:
             REGISTERED_NODES[node_id]["prompt_hash"] = prompt_hash
         del CHALLENGES[node_id]
@@ -2360,8 +2442,6 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
         if not ROUTER:
             raise HTTPException(status_code=503, detail="Gateway not ready")
 
-        await prune_dead_endpoints()
- 
         # Collect all nodes to exclude: caller, explicit exclusions, and visited nodes trace
         visited_header = request.headers.get("x-visited-nodes", "")
         visited_nodes = [x.strip() for x in visited_header.split(",") if x.strip()]
@@ -2398,7 +2478,7 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
             item_is_public = not norm_item_channels or "public" in norm_item_channels
             has_channel_overlap = bool(norm_caller_channels.intersection(norm_item_channels))
             if item_is_public or has_channel_overlap:
-                target_node_id = direct_reg_item.get("node_id") or target_direct
+                target_node_id = (target_tool or direct_reg_item.get("name") or target_direct) if direct_reg_item.get("type") == "tool" else (direct_reg_item.get("node_id") or target_direct)
                 target_type = direct_reg_item.get("type", "agent")
                 return _execute_authorization(
                     caller_id=caller_id,
@@ -2505,6 +2585,8 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
             
         norm_url = _normalize_local_url(url)
         current_target_id = node_id or (list(new_agents.keys())[0] if new_agents else None)
+        channel_list = [ch.strip() for ch in channels.split(",") if ch.strip()]
+        new_hash = _compute_skills_hash(new_agents, channel_list, url)
 
         if node_id is not None:
             for reg_id, reg_info in REGISTERED_NODES.items():
@@ -2523,6 +2605,27 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
                                     status_code=409,
                                     detail=f"A node with identical semantic metadata is already registered under node_id '{existing_node}'"
                                 )
+
+        # FAST PATH: Check if this node is already indexed with identical metadata
+        existing_node_info = REGISTERED_NODES.get(current_target_id)
+        if existing_node_info and existing_node_info.get("metadata_hash") == new_hash:
+            if ROUTER and all(k in ROUTER.registry for k in new_agents.keys()):
+                now = time.time()
+                REGISTERED_NODES[current_target_id]["last_seen"] = now
+                REGISTERED_NODES[current_target_id]["status"] = "healthy"
+                REGISTERED_NODES[current_target_id]["url"] = url
+                REGISTERED_NODES[current_target_id]["channels"] = channel_list
+                if prompt_hash:
+                    REGISTERED_NODES[current_target_id]["prompt_hash"] = prompt_hash
+                if hasattr(prune_dead_endpoints, "_fail_counts"):
+                    prune_dead_endpoints._fail_counts[url] = 0
+                persist_endpoint("agent", url)
+                add_system_log("REGISTRATION", current_target_id, f"Agent at {url} re-registered. Capabilities unchanged; FAISS index preserved (0ms overhead).")
+                return {
+                    "status": "success",
+                    "message": f"Successfully registered Agent at {url} (cached)",
+                    "registered_skills": list(new_agents.keys())
+                }
 
         # Unregister any previous registration for this agent / normalized URL before re-registering
         preserved_pubkey = None
@@ -2566,12 +2669,16 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
                     new_agents[skill_id]["precomputed_embedding"] = pre_embs[skill_id]
             
         # Update or add agent skills in registry
+        now = time.time()
         for skill_id, item in new_agents.items():
             target_id = node_id or skill_id
             if target_id not in REGISTERED_NODES:
                 REGISTERED_NODES[target_id] = {}
             REGISTERED_NODES[target_id]["url"] = url
             REGISTERED_NODES[target_id]["channels"] = channel_list
+            REGISTERED_NODES[target_id]["metadata_hash"] = new_hash
+            REGISTERED_NODES[target_id]["last_seen"] = now
+            REGISTERED_NODES[target_id]["status"] = "healthy"
             if preserved_pubkey:
                 REGISTERED_NODES[target_id]["public_key"] = preserved_pubkey
             if actual_prompt_hash:
@@ -2623,14 +2730,38 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
                                     detail=f"A node with identical semantic metadata is already registered under node_id '{existing_node}'"
                                 )
 
-        # Unregister any previous registration for this MCP server / normalized URL before re-registering
         effective_node_id = node_id
+        target_id = effective_node_id or url
+        channel_list = [ch.strip() for ch in channels.split(",") if ch.strip()]
+        new_hash = _compute_skills_hash(new_tools, channel_list, url)
+
+        # FAST PATH: Check if this MCP server is already indexed with identical metadata
+        existing_node_info = REGISTERED_NODES.get(target_id)
+        if existing_node_info and existing_node_info.get("metadata_hash") == new_hash:
+            if ROUTER and all(k in ROUTER.registry for k in new_tools.keys()):
+                now = time.time()
+                REGISTERED_NODES[target_id]["last_seen"] = now
+                REGISTERED_NODES[target_id]["status"] = "healthy"
+                REGISTERED_NODES[target_id]["url"] = url
+                REGISTERED_NODES[target_id]["channels"] = channel_list
+                if hasattr(prune_dead_endpoints, "_fail_counts"):
+                    prune_dead_endpoints._fail_counts[url] = 0
+                persist_endpoint("mcp", url)
+                add_system_log("REGISTRATION", target_id, f"MCP Server at {url} re-registered. Tools unchanged; FAISS index preserved (0ms overhead).")
+                return {
+                    "status": "success",
+                    "message": f"Successfully registered MCP Server at {url} (cached)",
+                    "registered_tools": list(new_tools.keys())
+                }
+
+        # Unregister any previous registration for this MCP server / normalized URL before re-registering
         preserved_pubkey = None
         for reg_id, reg_info in list(REGISTERED_NODES.items()):
             reg_url = reg_info.get("url") or ""
             if reg_id == node_id or reg_url == url or (norm_url and reg_url and _normalize_local_url(reg_url) == norm_url):
                 if not effective_node_id and not reg_id.startswith("http"):
                     effective_node_id = reg_id
+                    target_id = effective_node_id
                 if reg_info.get("public_key"):
                     preserved_pubkey = reg_info["public_key"]
                 if reg_url and reg_url != url:
@@ -2645,12 +2776,11 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
                 (norm_url and existing_server and _normalize_local_url(existing_server) == norm_url)):
                 if not effective_node_id and existing_node and not existing_node.startswith("http"):
                     effective_node_id = existing_node
+                    target_id = effective_node_id
                 if existing_server and existing_server != url:
                     _remove_persisted_endpoint(existing_server)
                 del ROUTER.registry[existing_id]
 
-        target_id = effective_node_id or url
-        channel_list = [ch.strip() for ch in channels.split(",") if ch.strip()]
         for tool_name, new_item in new_tools.items():
             new_tools[tool_name]["channels"] = channel_list
             new_tools[tool_name]["node_id"] = target_id
@@ -2660,10 +2790,14 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
                     new_tools[tool_name]["precomputed_embedding"] = pre_embs[tool_name]
             
         # Update or add MCP tools in registry
+        now = time.time()
         if target_id not in REGISTERED_NODES:
             REGISTERED_NODES[target_id] = {}
         REGISTERED_NODES[target_id]["url"] = url
         REGISTERED_NODES[target_id]["channels"] = channel_list
+        REGISTERED_NODES[target_id]["metadata_hash"] = new_hash
+        REGISTERED_NODES[target_id]["last_seen"] = now
+        REGISTERED_NODES[target_id]["status"] = "healthy"
         if preserved_pubkey:
             REGISTERED_NODES[target_id]["public_key"] = preserved_pubkey
 
@@ -2695,8 +2829,6 @@ def create_gateway_app(config: BFAConfig = None) -> FastAPI:
         """
         if not ROUTER:
             raise HTTPException(status_code=503, detail="Gateway not ready")
-            
-        await prune_dead_endpoints()
             
         # Extract caller authentication and channels if provided
         auth_token = None
